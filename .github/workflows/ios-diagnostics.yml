@@ -1,0 +1,104 @@
+name: Export iOS diagnostics
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Create diagnostics
+        shell: bash
+        run: |
+          {
+            echo "========================================"
+            echo "REPOSITORY STRUCTURE"
+            echo "========================================"
+
+            find . \
+              -path "./.git" -prune -o \
+              -path "./.gradle" -prune -o \
+              -path "*/build" -prune -o \
+              -maxdepth 5 \
+              -print | sort
+
+            echo
+            echo "========================================"
+            echo "GRADLE PROJECTS"
+            echo "========================================"
+
+            ./gradlew projects || true
+
+            echo
+            echo "========================================"
+            echo "APPLE AND IOS GRADLE TASKS"
+            echo "========================================"
+
+            ./gradlew tasks --all \
+              | grep -Ei "ios|iphone|apple|framework|xcode|embed|link|sync" \
+              || true
+
+            echo
+            echo "========================================"
+            echo "XCODE PROJECTS AND WORKSPACES"
+            echo "========================================"
+
+            find . \
+              \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) \
+              -not -path "*/build/*" \
+              -not -path "*/Pods/*" \
+              -print
+
+            echo
+            echo "========================================"
+            echo "XCODE SCHEMES"
+            echo "========================================"
+
+            while IFS= read -r project; do
+              echo
+              echo "PROJECT: $project"
+              xcodebuild -list -project "$project" || true
+            done < <(
+              find . \
+                -name "*.xcodeproj" \
+                -not -path "*/build/*" \
+                -not -path "*/Pods/*"
+            )
+
+            while IFS= read -r workspace; do
+              echo
+              echo "WORKSPACE: $workspace"
+              xcodebuild -list -workspace "$workspace" || true
+            done < <(
+              find . \
+                -name "*.xcworkspace" \
+                -not -path "*/build/*" \
+                -not -path "*/Pods/*" \
+                -not -path "*.xcodeproj/project.xcworkspace"
+            )
+          } > ios-diagnostics.txt 2>&1
+
+          cat ios-diagnostics.txt
+
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-diagnostics
+          path: ios-diagnostics.txt
+          if-no-files-found: error
