@@ -1,41 +1,100 @@
-name: iOS starter workflow
+name: Build unsigned iOS IPA
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build and Test default scheme using any available iPhone simulator
+  build-ios:
+    name: Build unsigned iOS IPA
     runs-on: macos-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Set Default Scheme
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Show build environment
         run: |
-          scheme_list=$(xcodebuild -list -json | tr -d "\n")
-          default=$(echo $scheme_list | ruby -e "require 'json'; puts JSON.parse(STDIN.gets)['project']['targets'][0]")
-          echo $default | cat >default
-          echo Using default scheme: $default
-      - name: Build
-        env:
-          scheme: ${{ 'default' }}
-          platform: ${{ 'iOS Simulator' }}
+          xcodebuild -version
+          ./gradlew --version
+
+      - name: Verify Xcode project
         run: |
-          # xcrun xctrace returns via stderr, not the expected stdout (see https://developer.apple.com/forums/thread/663959)
-          device=`xcrun xctrace list devices 2>&1 | grep -oE 'iPhone.*?[^\(]+' | head -1 | awk '{$1=$1;print}' | sed -e "s/ Simulator$//"`
-          if [ $scheme = default ]; then scheme=$(cat default); fi
-          if [ "`ls -A | grep -i \\.xcworkspace\$`" ]; then filetype_parameter="workspace" && file_to_build="`ls -A | grep -i \\.xcworkspace\$`"; else filetype_parameter="project" && file_to_build="`ls -A | grep -i \\.xcodeproj\$`"; fi
-          file_to_build=`echo $file_to_build | awk '{$1=$1;print}'`
-          xcodebuild build-for-testing -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -destination "platform=$platform,name=$device"
-      - name: Test
-        env:
-          scheme: ${{ 'default' }}
-          platform: ${{ 'iOS Simulator' }}
+          xcodebuild \
+            -list \
+            -project "iosApp/iosApp.xcodeproj"
+
+      - name: Build iOS app without code signing
         run: |
-          # xcrun xctrace returns via stderr, not the expected stdout (see https://developer.apple.com/forums/thread/663959)
-          device=`xcrun xctrace list devices 2>&1 | grep -oE 'iPhone.*?[^\(]+' | head -1 | awk '{$1=$1;print}' | sed -e "s/ Simulator$//"`
-          if [ $scheme = default ]; then scheme=$(cat default); fi
-          if [ "`ls -A | grep -i \\.xcworkspace\$`" ]; then filetype_parameter="workspace" && file_to_build="`ls -A | grep -i \\.xcworkspace\$`"; else filetype_parameter="project" && file_to_build="`ls -A | grep -i \\.xcodeproj\$`"; fi
-          file_to_build=`echo $file_to_build | awk '{$1=$1;print}'`
-          xcodebuild test-without-building -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -destination "platform=$platform,name=$device"
+          set -o pipefail
+
+          xcodebuild \
+            -project "iosApp/iosApp.xcodeproj" \
+            -scheme "iosApp" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build-ios" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            clean build
+
+      - name: Locate built app
+        run: |
+          echo "Available app bundles:"
+
+          find "$GITHUB_WORKSPACE/build-ios" \
+            -type d \
+            -name "*.app" \
+            -print
+
+      - name: Create unsigned IPA
+        shell: bash
+        run: |
+          set -e
+
+          APP_PATH="$(find \
+            "$GITHUB_WORKSPACE/build-ios/Build/Products/Release-iphoneos" \
+            -maxdepth 1 \
+            -type d \
+            -name "*.app" \
+            | head -1)"
+
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app bundle was found."
+            exit 1
+          fi
+
+          echo "Using app bundle: $APP_PATH"
+
+          rm -rf "$GITHUB_WORKSPACE/ipa"
+          mkdir -p "$GITHUB_WORKSPACE/ipa/Payload"
+
+          cp -R "$APP_PATH" "$GITHUB_WORKSPACE/ipa/Payload/"
+
+          cd "$GITHUB_WORKSPACE/ipa"
+          zip -r "$GITHUB_WORKSPACE/EffnerApp-unsigned.ipa" Payload
+
+          echo "Created IPA:"
+          ls -lh "$GITHUB_WORKSPACE/EffnerApp-unsigned.ipa"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: EffnerApp-iOS-unsigned
+          path: EffnerApp-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
